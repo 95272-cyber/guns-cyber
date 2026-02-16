@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>JS FPS Prototype</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000; font-family: Arial, sans-serif; }
+        #crosshair {
+            position: absolute; top: 50%; left: 50%;
+            width: 20px; height: 20px;
+            background: transparent;
+            border: 2px solid #00ff00;
+            border-radius: 50%;
+            transform: translate(-50%, -50%);
+            pointer-events: none;
+        }
+        #dot {
+            position: absolute; top: 50%; left: 50%;
+            width: 4px; height: 4px; background: red;
+            transform: translate(-50%, -50%);
+            border-radius: 50%; pointer-events: none;
+        }
+        #instructions {
+            position: absolute; top: 10px; left: 10px; color: white;
+            background: rgba(0,0,0,0.5); padding: 10px; pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+    <div id="crosshair"></div>
+    <div id="dot"></div>
+    <div id="instructions">
+        <h2>JavaScript FPS</h2>
+        <p>Click screen to Start</p>
+        <p><b>WASD</b> to Move | <b>Click</b> to Shoot</p>
+    </div>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
+
+        let camera, scene, renderer, controls;
+        let raycaster;
+        
+        // Movement variables
+        let moveForward = false;
+        let moveBackward = false;
+        let moveLeft = false;
+        let moveRight = false;
+        let canJump = false;
+
+        let prevTime = performance.now();
+        const velocity = new THREE.Vector3();
+        const direction = new THREE.Vector3();
+
+        // Game Objects
+        let gunGroup;
+        const targets = [];
+
+        init();
+        animate();
+
+        function init() {
+            // 1. Setup Scene
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x87CEEB); // Sky blue
+            scene.fog = new THREE.Fog(0x87CEEB, 0, 750);
+
+            // 2. Setup Lighting (for "Good Detail")
+            const light = new THREE.HemisphereLight(0xeeeeff, 0x777788, 0.75);
+            light.position.set(0.5, 1, 0.75);
+            scene.add(light);
+            
+            // Directional light for shadows
+            const dirLight = new THREE.DirectionalLight(0xFFFFFF, 1.5);
+            dirLight.position.set(10, 20, 10);
+            scene.add(dirLight);
+
+            // 3. Setup Camera
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 1, 1000);
+            
+            // 4. Setup Controls
+            controls = new PointerLockControls(camera, document.body);
+
+            const instructions = document.getElementById('instructions');
+            
+            // Handle clicking to lock mouse
+            document.addEventListener('click', function () {
+                controls.lock();
+            });
+
+            controls.addEventListener('lock', function () {
+                instructions.style.display = 'none';
+            });
+
+            controls.addEventListener('unlock', function () {
+                instructions.style.display = 'block';
+            });
+
+            scene.add(controls.getObject());
+
+            // 5. Build the "Gun" (Procedural Modeling)
+            buildGun();
+
+            // 6. Build the World
+            // Floor
+            const floorGeometry = new THREE.PlaneGeometry(2000, 2000, 100, 100);
+            floorGeometry.rotateX(-Math.PI / 2);
+            const floorMaterial = new THREE.MeshStandardMaterial({ 
+                color: 0x333333, 
+                wireframe: false 
+            });
+            const floor = new THREE.Mesh(floorGeometry, floorMaterial);
+            scene.add(floor);
+            
+            // Grid helper for detail feel
+            const grid = new THREE.GridHelper(2000, 100, 0x000000, 0x555555);
+            scene.add(grid);
+
+            // Create Targets (Cubes)
+            const boxGeometry = new THREE.BoxGeometry(20, 20, 20);
+            
+            for (let i = 0; i < 20; i++) {
+                const boxMaterial = new THREE.MeshStandardMaterial({ 
+                    color: Math.random() * 0xffffff,
+                    roughness: 0.2,
+                    metalness: 0.5 
+                });
+                const box = new THREE.Mesh(boxGeometry, boxMaterial);
+                
+                box.position.x = Math.floor(Math.random() * 20 - 10) * 20;
+                box.position.y = Math.floor(Math.random() * 20) + 10;
+                box.position.z = Math.floor(Math.random() * 20 - 10) * 20;
+
+                scene.add(box);
+                targets.push(box);
+            }
+
+            // Raycaster for shooting
+            raycaster = new THREE.Raycaster();
+
+            // 7. Setup Key Listeners
+            const onKeyDown = function (event) {
+                switch (event.code) {
+                    case 'ArrowUp': case 'KeyW': moveForward = true; break;
+                    case 'ArrowLeft': case 'KeyA': moveLeft = true; break;
+                    case 'ArrowDown': case 'KeyS': moveBackward = true; break;
+                    case 'ArrowRight': case 'KeyD': moveRight = true; break;
+                    case 'Space': if (canJump === true) velocity.y += 350; canJump = false; break;
+                }
+            };
+
+            const onKeyUp = function (event) {
+                switch (event.code) {
+                    case 'ArrowUp': case 'KeyW': moveForward = false; break;
+                    case 'ArrowLeft': case 'KeyA': moveLeft = false; break;
+                    case 'ArrowDown': case 'KeyS': moveBackward = false; break;
+                    case 'ArrowRight': case 'KeyD': moveRight = false; break;
+                }
+            };
+
+            document.addEventListener('keydown', onKeyDown);
+            document.addEventListener('keyup', onKeyUp);
+            document.addEventListener('mousedown', onShoot); // Shoot listener
+
+            // Renderer Setup
+            renderer = new THREE.WebGLRenderer({ antialias: true }); // Antialias for smooth edges
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            document.body.appendChild(renderer.domElement);
+
+            window.addEventListener('resize', onWindowResize);
+        }
+
+        function buildGun() {
+            // Because I cannot send you a 3D model file, I am building one using code.
+            gunGroup = new THREE.Group();
+            
+            // Gun Body
+            const bodyGeo = new THREE.BoxGeometry(0.5, 0.5, 2);
+            const bodyMat = new THREE.MeshStandardMaterial({ color: 0x222222, metalness: 0.8, roughness: 0.2 });
+            const body = new THREE.Mesh(bodyGeo, bodyMat);
+            body.position.set(0, 0, 0);
+            
+            // Gun Barrel
+            const barrelGeo = new THREE.CylinderGeometry(0.1, 0.1, 2.5, 16);
+            const barrelMat = new THREE.MeshStandardMaterial({ color: 0x111111 });
+            const barrel = new THREE.Mesh(barrelGeo, barrelMat);
+            barrel.rotation.x = Math.PI / 2;
+            barrel.position.set(0, 0.2, -0.5);
+
+            // Gun Handle
+            const handleGeo = new THREE.BoxGeometry(0.4, 1.2, 0.5);
+            const handle = new THREE.Mesh(handleGeo, bodyMat);
+            handle.position.set(0, -0.6, 0.5);
+            handle.rotation.x = 0.5;
+
+            gunGroup.add(body);
+            gunGroup.add(barrel);
+            gunGroup.add(handle);
+
+            // Position gun relative to camera
+            gunGroup.position.set(0.5, -0.5, -1);
+            camera.add(gunGroup); // Attach gun to camera
+        }
+
+        function onShoot() {
+            if (!controls.isLocked) return;
+
+            // 1. Recoil Animation (Visual)
+            gunGroup.position.z += 0.2;
+            
+            // 2. Raycast Physics (Logic)
+            // Raycast from center of screen
+            raycaster.setFromCamera(new THREE.Vector2(), camera);
+            
+            const intersects = raycaster.intersectObjects(targets);
+
+            if (intersects.length > 0) {
+                const hitObject = intersects[0].object;
+                
+                // Visual feedback: change color to red then remove
+                hitObject.material.color.set(0xff0000);
+                
+                // Small simple logic to remove enemy after delay
+                setTimeout(() => {
+                    scene.remove(hitObject);
+                    // Remove from array
+                    const index = targets.indexOf(hitObject);
+                    if (index > -1) targets.splice(index, 1);
+                }, 100);
+            }
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            const time = performance.now();
+            
+            if (controls.isLocked === true) {
+                // Return gun to original position (recoil recovery)
+                if(gunGroup.position.z > -1) {
+                    gunGroup.position.z -= 0.01;
+                }
+
+                const delta = (time - prevTime) / 1000;
+
+                // Physics logic
+                velocity.x -= velocity.x * 10.0 * delta;
+                velocity.z -= velocity.z * 10.0 * delta;
+                velocity.y -= 9.8 * 100.0 * delta; // Gravity
+
+                direction.z = Number(moveForward) - Number(moveBackward);
+                direction.x = Number(moveRight) - Number(moveLeft);
+                direction.normalize();
+
+                if (moveForward || moveBackward) velocity.z -= direction.z * 400.0 * delta;
+                if (moveLeft || moveRight) velocity.x -= direction.x * 400.0 * delta;
+
+                controls.moveRight(-velocity.x * delta);
+                controls.moveForward(-velocity.z * delta);
+
+                controls.getObject().position.y += (velocity.y * delta); // New behavior
+
+                // Floor collision
+                if (controls.getObject().position.y < 10) {
+                    velocity.y = 0;
+                    controls.getObject().position.y = 10;
+                    canJump = true;
+                }
+            }
+
+            prevTime = time;
+            renderer.render(scene, camera);
+        }
+    </script>
+</body>
+</html>
